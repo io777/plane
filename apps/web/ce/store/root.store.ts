@@ -6,15 +6,19 @@
 
 // store
 import { CoreRootStore } from "@/store/root.store";
+import type { IAIChatStore } from "./ai-chat.store";
+import { AIChatStore } from "./ai-chat.store";
 import type { ITimelineStore } from "./timeline";
 import { TimeLineStore } from "./timeline";
 
 export class RootStore extends CoreRootStore {
   timelineStore: ITimelineStore;
+  aiChat: IAIChatStore;
 
   constructor() {
     super();
 
     this.timelineStore = new TimeLineStore(this);
+    this.aiChat = new AIChatStore(this);
   }
 }

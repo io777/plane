@@ -13,6 +13,12 @@ const ProfileSettingsModal = lazy(() =>
   }))
 );
 
+const AIChatDock = lazy(() =>
+  import("@/plane-web/components/ai-chat/dock").then((module) => ({
+    default: module.AIChatDock,
+  }))
+);
+
 type TGlobalModalsProps = {
   workspaceSlug: string;
 };
@@ -22,11 +28,13 @@ type TGlobalModalsProps = {
  *
  * This includes:
  * - Profile settings modal
+ * - AI chat dock
  */
 export const GlobalModals = observer(function GlobalModals(_props: TGlobalModalsProps) {
   return (
     <Suspense fallback={null}>
       <ProfileSettingsModal />
+      <AIChatDock />
     </Suspense>
   );
 });

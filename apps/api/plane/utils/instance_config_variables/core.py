@@ -221,6 +221,25 @@ llm_config_variables = [
         "category": "AI",
         "is_encrypted": False,
     },
+    # AI chat assistant
+    {
+        "key": "AI_CHAT_API_KEY",
+        "value": os.environ.get("AI_CHAT_API_KEY"),
+        "category": "AI",
+        "is_encrypted": True,
+    },
+    {
+        "key": "AI_CHAT_BASE_URL",
+        "value": os.environ.get("AI_CHAT_BASE_URL", ""),
+        "category": "AI",
+        "is_encrypted": False,
+    },
+    {
+        "key": "AI_CHAT_MODEL",
+        "value": os.environ.get("AI_CHAT_MODEL", ""),
+        "category": "AI",
+        "is_encrypted": False,
+    },
 ]
 
 unsplash_config_variables = [

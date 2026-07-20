@@ -4,5 +4,6 @@
  * See the LICENSE file for details.
  */
 
+export * from "./use-ai-chat";
 export * from "./use-page-store";
 export * from "./use-page";
