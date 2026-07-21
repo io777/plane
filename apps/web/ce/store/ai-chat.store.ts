@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { action, computed, makeObservable, observable, runInAction } from "mobx";
+import { action, computed, makeObservable, observable, reaction, runInAction } from "mobx";
 // services
 import type { TAIChatMessage, TAIChatThread } from "@plane/services";
 import { AIChatService } from "@plane/services";
@@ -12,6 +12,7 @@ import { AIChatService } from "@plane/services";
 import type { RootStore } from "@/plane-web/store/root.store";
 
 const POLL_INTERVAL = 2000;
+const PANEL_STATE_KEY = "plane-ai-chat-panel-state";
 
 export interface IAIChatStore {
   // observables
@@ -79,6 +80,40 @@ export class AIChatStore implements IAIChatStore {
       stopPolling: action,
     });
     this.aiChatService = new AIChatService();
+
+    // Restore panel state across page reloads (the page reloads when the agent
+    // mutates workspace data — the chat should stay open with the same thread)
+    try {
+      const saved = window.sessionStorage.getItem(PANEL_STATE_KEY);
+      if (saved) {
+        const { isOpen, currentThreadId, workspaceSlug } = JSON.parse(saved);
+        this.isOpen = isOpen ?? false;
+        this.currentThreadId = currentThreadId ?? null;
+        this.workspaceSlug = workspaceSlug ?? null;
+      }
+    } catch {
+      // sessionStorage unavailable or corrupted state — start fresh
+    }
+
+    // Persist panel state on every change
+    reaction(
+      () => [this.isOpen, this.currentThreadId, this.workspaceSlug] as const,
+      ([isOpen, currentThreadId, workspaceSlug]) => {
+        try {
+          window.sessionStorage.setItem(
+            PANEL_STATE_KEY,
+            JSON.stringify({ isOpen, currentThreadId, workspaceSlug }),
+          );
+        } catch {
+          // ignore persistence errors
+        }
+      },
+    );
+
+    // After a reload, re-fetch messages of the restored open thread
+    if (this.isOpen && this.currentThreadId && this.workspaceSlug) {
+      void this.selectThread(this.workspaceSlug, this.currentThreadId);
+    }
   }
 
   /**
