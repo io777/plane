@@ -24,6 +24,8 @@ export interface IAIChatStore {
   isLoadingMessages: boolean;
   isSending: boolean;
   error: string | null;
+  // bumped when the agent mutates workspace data — the dock revalidates SWR caches
+  mutationNonce: number;
   // computed
   isAnyMessageProcessing: boolean;
   // actions
@@ -48,6 +50,7 @@ export class AIChatStore implements IAIChatStore {
   isLoadingMessages: boolean = false;
   isSending: boolean = false;
   error: string | null = null;
+  mutationNonce: number = 0;
   // internal
   private pollingInterval: ReturnType<typeof setInterval> | null = null;
   private workspaceSlug: string | null = null;
@@ -67,6 +70,7 @@ export class AIChatStore implements IAIChatStore {
       isLoadingMessages: observable,
       isSending: observable,
       error: observable,
+      mutationNonce: observable,
       // computed
       isAnyMessageProcessing: computed,
       // actions
@@ -321,8 +325,9 @@ export class AIChatStore implements IAIChatStore {
           this.messages = messages;
         });
         // If an agent message that was processing in the previous tick finished
-        // and it mutated workspace data, reload the page so the changes show up
-        // without a manual refresh
+        // and it mutated workspace data, bump mutationNonce — the dock listens
+        // to it and revalidates all SWR caches, so pages refresh in place
+        // (no full page reload, the chat stays open)
         const finishedIds = [...this.previouslyProcessingIds].filter(
           (id) => !messages.some((m) => m.id === id && m.status === "processing"),
         );
@@ -334,9 +339,9 @@ export class AIChatStore implements IAIChatStore {
           messages.filter((m) => m.status === "processing").map((m) => m.id),
         );
         if (mutated) {
-          this.stopPolling();
-          window.location.reload();
-          return;
+          runInAction(() => {
+            this.mutationNonce += 1;
+          });
         }
         if (!this.isAnyMessageProcessing) this.stopPolling();
       } catch {

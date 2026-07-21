@@ -8,6 +8,7 @@ import { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
+import { useSWRConfig } from "swr";
 import { Plus, Sparkles, X } from "lucide-react";
 // plane imports
 import { cn } from "@plane/utils";
@@ -29,7 +30,16 @@ export const AIChatDock = observer(function AIChatDock() {
   const aiChatStore = useAIChat();
   // derived values
   const workspaceId = getWorkspaceBySlug(workspaceSlug)?.id ?? "";
-  const { isOpen } = aiChatStore;
+  const { isOpen, mutationNonce } = aiChatStore;
+  const { mutate } = useSWRConfig();
+
+  // When the agent mutates workspace data, revalidate all SWR caches in place —
+  // pages refetch without a full reload and the chat stays open
+  useEffect(() => {
+    if (mutationNonce > 0) {
+      void mutate(() => true, undefined, { revalidate: true });
+    }
+  }, [mutationNonce, mutate]);
 
   // close the panel on Escape
   useKeypress("Escape", () => {
