@@ -433,7 +433,7 @@ def _get_llm_client():
     if not api_key or not model:
         raise ValueError("AI chat is not configured (AI_CHAT_API_KEY and AI_CHAT_MODEL are required)")
     client = OpenAI(api_key=api_key, base_url=base_url or None, timeout=120)
-    return client, model
+    return client, model, (base_url or "")
 
 
 def _build_system_prompt(workspace):
@@ -465,7 +465,7 @@ def _load_history(thread_id, exclude_message_id):
 
 
 def _run_agent(user, workspace, thread_id, exclude_message_id):
-    client, model = _get_llm_client()
+    client, model, base_url_hint = _get_llm_client()
     ctx = {"user": user, "workspace": workspace}
     ctx["project_ids"] = _member_project_ids(ctx)
 
@@ -475,13 +475,24 @@ def _run_agent(user, workspace, thread_id, exclude_message_id):
     final_text = ""
     tools_used = []
     for iteration in range(MAX_AGENT_ITERATIONS):
+        # Первый вызов за ход — принудительно с инструментом: иначе модель
+        # может "ответить текстом" и сымитировать действие без tool calls.
+        # tool_choice=required несовместим с thinking, поэтому на этом шаге
+        # мышление отключаем (это шаг маршрутизации к инструменту).
+        request_kwargs = {}
+        if iteration == 0:
+            request_kwargs["tool_choice"] = "required"
+            # thinking-off поддерживается только у Kimi/Moonshot — на других
+            # OpenAI-совместимых endpoint'ах extra_body может быть отвергнут
+            if "kimi" in (base_url_hint or "") or "moonshot" in (base_url_hint or ""):
+                request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        else:
+            request_kwargs["tool_choice"] = "auto"
         response = client.chat.completions.create(
             model=model,
             messages=messages,
             tools=TOOL_SCHEMAS,
-            # Первый вызов за ход — принудительно с инструментом: иначе модель
-            # может "ответить текстом" и сымитировать действие без tool calls
-            tool_choice="required" if iteration == 0 else "auto",
+            **request_kwargs,
         )
         choice = response.choices[0]
         assistant_message = choice.message
