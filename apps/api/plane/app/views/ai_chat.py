@@ -33,6 +33,7 @@ def serialize_message(message):
         "content": message.content,
         "status": message.status,
         "error": message.error,
+        "meta": message.meta,
         "created_at": message.created_at,
     }
 

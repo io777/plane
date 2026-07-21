@@ -42,6 +42,10 @@ export type TAIChatMessage = {
   content: string;
   status: TAIChatMessageStatus;
   error: string | null;
+  meta?: {
+    tools_used?: string[];
+    mutated?: boolean;
+  };
   created_at: string;
 };
 

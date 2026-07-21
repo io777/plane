@@ -36,6 +36,8 @@ MAX_AGENT_ITERATIONS = 8
 HISTORY_LIMIT = 20
 # Hard cap on issues returned by the search_issues tool
 SEARCH_LIMIT = 25
+# Tools that modify data — used to flag messages that changed workspace data
+WRITE_TOOLS = {"create_issue", "update_issue_state", "add_issue_comment"}
 
 TOOL_SCHEMAS = [
     {
@@ -289,6 +291,7 @@ def _run_agent(user, workspace, thread_id, exclude_message_id):
     messages.extend(_load_history(thread_id, exclude_message_id))
 
     final_text = ""
+    tools_used = []
     for _ in range(MAX_AGENT_ITERATIONS):
         response = client.chat.completions.create(
             model=model,
@@ -312,6 +315,7 @@ def _run_agent(user, workspace, thread_id, exclude_message_id):
         )
         for tool_call in assistant_message.tool_calls:
             handler = TOOL_HANDLERS.get(tool_call.function.name)
+            tools_used.append(tool_call.function.name)
             try:
                 if handler is None:
                     raise ValueError(f"Unknown tool: {tool_call.function.name}")
@@ -329,7 +333,11 @@ def _run_agent(user, workspace, thread_id, exclude_message_id):
     else:
         final_text = final_text or "I reached the maximum number of tool calls for this message. Please try again."
 
-    return final_text
+    meta = {
+        "tools_used": tools_used,
+        "mutated": any(tool in WRITE_TOOLS for tool in tools_used),
+    }
+    return final_text, meta
 
 
 @shared_task
@@ -353,15 +361,16 @@ def ai_chat_task(thread_id, message_id, user_id, slug):
             message.save(update_fields=["status", "error", "updated_at"])
             return
 
-        final_text = _run_agent(
+        final_text, meta = _run_agent(
             user=user,
             workspace=workspace,
             thread_id=thread_id,
             exclude_message_id=message.id,
         )
         message.content = final_text
+        message.meta = meta
         message.status = "completed"
-        message.save(update_fields=["content", "status", "updated_at"])
+        message.save(update_fields=["content", "meta", "status", "updated_at"])
     except Exception as e:
         log_exception(e)
         if message is not None:

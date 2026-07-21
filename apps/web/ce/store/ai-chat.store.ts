@@ -50,6 +50,8 @@ export class AIChatStore implements IAIChatStore {
   // internal
   private pollingInterval: ReturnType<typeof setInterval> | null = null;
   private workspaceSlug: string | null = null;
+  // ids of messages seen as "processing" in the previous poll tick
+  private previouslyProcessingIds = new Set<string>();
   // service
   private aiChatService: AIChatService;
 
@@ -270,6 +272,7 @@ export class AIChatStore implements IAIChatStore {
    */
   startPolling = (workspaceSlug: string) => {
     if (this.pollingInterval) return;
+    this.previouslyProcessingIds = new Set();
     this.pollingInterval = setInterval(async () => {
       const threadId = this.currentThreadId;
       if (!this.isOpen || !threadId) {
@@ -282,6 +285,24 @@ export class AIChatStore implements IAIChatStore {
           if (this.currentThreadId !== threadId) return;
           this.messages = messages;
         });
+        // If an agent message that was processing in the previous tick finished
+        // and it mutated workspace data, reload the page so the changes show up
+        // without a manual refresh
+        const finishedIds = [...this.previouslyProcessingIds].filter(
+          (id) => !messages.some((m) => m.id === id && m.status === "processing"),
+        );
+        const mutated = finishedIds.some((id) => {
+          const message = messages.find((m) => m.id === id);
+          return message?.status === "completed" && message?.meta?.mutated === true;
+        });
+        this.previouslyProcessingIds = new Set(
+          messages.filter((m) => m.status === "processing").map((m) => m.id),
+        );
+        if (mutated) {
+          this.stopPolling();
+          window.location.reload();
+          return;
+        }
         if (!this.isAnyMessageProcessing) this.stopPolling();
       } catch {
         // keep polling on transient errors; the next tick retries

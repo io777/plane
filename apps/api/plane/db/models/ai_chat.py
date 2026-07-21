@@ -49,6 +49,8 @@ class AIChatMessage(WorkspaceBaseModel):
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default="sent")
     content = models.TextField(blank=True, default="")
     error = models.TextField(null=True, blank=True)
+    # Служебные данные агента: {"tools_used": [...], "mutated": bool}
+    meta = models.JSONField(default=dict, blank=True)
 
     class Meta:
         verbose_name = "AI Chat Message"

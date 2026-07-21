@@ -16,6 +16,7 @@ This fork adds a self-hosted AI chat assistant (Twenty CRM style) to Plane CE.
 | `plane/db/models/ai_chat.py` | NEW — `AIChatThread`, `AIChatMessage` |
 | `plane/db/models/__init__.py` | +1 export line |
 | `plane/db/migrations/0122_ai_chat.py` | NEW — hand-written migration (renumber when rebasing!) |
+| `plane/db/migrations/0123_ai_chat_message_meta.py` | NEW — `meta` JSONField (tools_used/mutated flags) |
 | `plane/app/views/ai_chat.py` | NEW — 5 workspace-scoped endpoints |
 | `plane/app/views/__init__.py` | +1 re-export line |
 | `plane/app/urls/ai_chat.py` | NEW — routes under `workspaces/<slug>/ai-chat/` |
