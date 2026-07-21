@@ -13,6 +13,7 @@ import { Plus, Sparkles, X } from "lucide-react";
 import { cn } from "@plane/utils";
 // hooks
 import { useWorkspace } from "@/hooks/store/use-workspace";
+import useKeypress from "@/hooks/use-keypress";
 import { useAIChat } from "@/plane-web/hooks/store";
 // local imports
 import { AIChatComposer } from "./composer";
@@ -29,6 +30,11 @@ export const AIChatDock = observer(function AIChatDock() {
   // derived values
   const workspaceId = getWorkspaceBySlug(workspaceSlug)?.id ?? "";
   const { isOpen } = aiChatStore;
+
+  // close the panel on Escape
+  useKeypress("Escape", () => {
+    if (isOpen) aiChatStore.setOpen(false);
+  });
 
   // fetch the thread list whenever the panel is opened
   useEffect(() => {
@@ -53,7 +59,7 @@ export const AIChatDock = observer(function AIChatDock() {
       {/* side panel */}
       <div
         className={cn(
-          "absolute top-0 right-0 bottom-0 z-[25] flex w-[420px] max-w-full flex-col overflow-hidden border-l border-subtle bg-surface-1 transition-transform duration-200",
+          "fixed top-0 right-0 bottom-0 z-[40] flex w-[420px] max-w-full flex-col overflow-hidden border-l border-subtle bg-surface-1 shadow-raised-200 transition-transform duration-200",
           {
             "translate-x-full pointer-events-none": !isOpen,
           }
