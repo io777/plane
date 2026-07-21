@@ -33,11 +33,17 @@ export const AIChatDock = observer(function AIChatDock() {
   const { isOpen, mutationNonce } = aiChatStore;
   const { mutate } = useSWRConfig();
 
-  // When the agent mutates workspace data, revalidate all SWR caches in place —
-  // pages refetch without a full reload and the chat stays open
+  // When the agent mutates workspace data, revalidate work-item SWR caches in
+  // place — pages refetch without a full reload and the chat stays open.
+  // Deliberately narrow: a blanket revalidation also refetches fragile keys
+  // (e.g. INSTANCE_INFORMATION), whose failure renders the maintenance screen.
   useEffect(() => {
     if (mutationNonce > 0) {
-      void mutate(() => true, undefined, { revalidate: true });
+      void mutate(
+        (key) => typeof key === "string" && /ISSUE|PROJECT/.test(key),
+        undefined,
+        { revalidate: true },
+      );
     }
   }, [mutationNonce, mutate]);
 
