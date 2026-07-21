@@ -5,6 +5,10 @@
 # Python imports
 import json
 import os
+import re
+
+# Идентификатор задачи вида PROJ-123 (project.identifier + sequence_id)
+ISSUE_IDENTIFIER_RE = re.compile(r"^([A-Za-z][A-Za-z0-9]*)-(\d+)$")
 
 # Django imports
 from django.contrib.auth import get_user_model
@@ -52,7 +56,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "search_issues",
-            "description": "Search issues by text in name or description. Returns compact issue summaries.",
+            "description": "Search issues by text in name/description or by identifier like PROJ-123. Returns compact issue summaries.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -73,10 +77,10 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_issue",
-            "description": "Get full details of a single issue, including description, state, assignees and recent comments.",
+            "description": "Get full details of a single issue (by UUID or identifier like PROJ-123), including description, state, assignees and recent comments.",
             "parameters": {
                 "type": "object",
-                "properties": {"issue_id": {"type": "string", "description": "Issue UUID."}},
+                "properties": {"issue_id": {"type": "string", "description": "Issue UUID or identifier like PROJ-123."}},
                 "required": ["issue_id"],
             },
         },
@@ -105,7 +109,7 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "issue_id": {"type": "string", "description": "Issue UUID."},
+                    "issue_id": {"type": "string", "description": "Issue UUID or identifier like PROJ-123."},
                     "state_id": {"type": "string", "description": "State UUID."},
                     "state_name": {"type": "string", "description": "State name, e.g. 'In Progress'."},
                 },
@@ -121,7 +125,7 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "issue_id": {"type": "string", "description": "Issue UUID."},
+                    "issue_id": {"type": "string", "description": "Issue UUID or identifier like PROJ-123."},
                     "comment_text": {"type": "string", "description": "Plain text comment."},
                 },
                 "required": ["issue_id", "comment_text"],
@@ -157,9 +161,18 @@ def _tool_list_projects(ctx):
 
 
 def _tool_search_issues(ctx, query, project_id=None, state_group=None, limit=10):
-    issues = Issue.issue_objects.filter(project_id__in=ctx["project_ids"]).filter(
-        Q(name__icontains=query) | Q(description_stripped__icontains=query)
-    )
+    issues = Issue.issue_objects.filter(project_id__in=ctx["project_ids"])
+    # Поддержка поиска по идентификатору вида PROJ-123
+    identifier_match = ISSUE_IDENTIFIER_RE.match((query or "").strip())
+    if identifier_match:
+        prefix, sequence_id = identifier_match.groups()
+        issues = issues.filter(
+            project__identifier__iexact=prefix, sequence_id=int(sequence_id)
+        )
+    else:
+        issues = issues.filter(
+            Q(name__icontains=query) | Q(description_stripped__icontains=query)
+        )
     if project_id:
         issues = issues.filter(project_id=project_id)
     if state_group:
@@ -169,7 +182,18 @@ def _tool_search_issues(ctx, query, project_id=None, state_group=None, limit=10)
 
 
 def _tool_get_issue(ctx, issue_id):
-    issue = Issue.issue_objects.select_related("project", "state").get(pk=issue_id, project_id__in=ctx["project_ids"])
+    issues = Issue.issue_objects.select_related("project", "state").filter(
+        project_id__in=ctx["project_ids"]
+    )
+    # Поддержка как UUID, так и идентификатора вида PROJ-123
+    identifier_match = ISSUE_IDENTIFIER_RE.match((issue_id or "").strip())
+    if identifier_match:
+        prefix, sequence_id = identifier_match.groups()
+        issue = issues.get(
+            project__identifier__iexact=prefix, sequence_id=int(sequence_id)
+        )
+    else:
+        issue = issues.get(pk=issue_id)
     comments = (
         IssueComment.objects.filter(issue=issue)
         .select_related("actor")
@@ -210,8 +234,20 @@ def _tool_create_issue(ctx, project_id, name, description_text=""):
     }
 
 
+def _resolve_issue(ctx, issue_id):
+    """Найти задачу по UUID или идентификатору вида PROJ-123."""
+    issues = Issue.issue_objects.filter(project_id__in=ctx["project_ids"])
+    identifier_match = ISSUE_IDENTIFIER_RE.match((issue_id or "").strip())
+    if identifier_match:
+        prefix, sequence_id = identifier_match.groups()
+        return issues.get(
+            project__identifier__iexact=prefix, sequence_id=int(sequence_id)
+        )
+    return issues.get(pk=issue_id)
+
+
 def _tool_update_issue_state(ctx, issue_id, state_id=None, state_name=None):
-    issue = Issue.issue_objects.select_related("project").get(pk=issue_id, project_id__in=ctx["project_ids"])
+    issue = _resolve_issue(ctx, issue_id)
     states = State.objects.filter(project=issue.project)
     if state_id:
         state = states.get(pk=state_id)
@@ -225,7 +261,7 @@ def _tool_update_issue_state(ctx, issue_id, state_id=None, state_name=None):
 
 
 def _tool_add_issue_comment(ctx, issue_id, comment_text):
-    issue = Issue.issue_objects.get(pk=issue_id, project_id__in=ctx["project_ids"])
+    issue = _resolve_issue(ctx, issue_id)
     comment = IssueComment.objects.create(
         issue=issue,
         project=issue.project,
@@ -268,7 +304,11 @@ def _build_system_prompt(workspace):
         f"You are operating in the workspace '{workspace.slug}'. "
         "You may use the provided tools to query and modify issues in the projects the user is a member of. "
         "Answer concisely and always in the user's language. "
-        "When listing issues, always include the issue identifier (e.g. PROJ-123) and its state."
+        "When listing issues, always include the issue identifier (e.g. PROJ-123) and its state. "
+        "The tools understand identifiers like PROJ-123 — prefer them when the user references a specific issue. "
+        "CRITICAL: never claim that you created, updated or deleted anything unless the corresponding tool "
+        "was actually called and returned a success result. If you did not call a tool, honestly say "
+        "that no changes were made and explain why."
     )
 
 
