@@ -41,7 +41,7 @@ HISTORY_LIMIT = 20
 # Hard cap on issues returned by the search_issues tool
 SEARCH_LIMIT = 25
 # Tools that modify data — used to flag messages that changed workspace data
-WRITE_TOOLS = {"create_issue", "update_issue_state", "add_issue_comment"}
+WRITE_TOOLS = {"create_issue", "update_issue_state", "bulk_update_issue_state", "add_issue_comment"}
 
 TOOL_SCHEMAS = [
     {
@@ -104,8 +104,58 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "list_states",
+            "description": "List the workflow states of a project (names like 'Backlog', 'Todo', 'In Progress', 'Done', 'Cancelled'). Call this BEFORE changing issue states to get exact state names.",
+            "parameters": {
+                "type": "object",
+                "properties": {"project_id": {"type": "string", "description": "Project UUID."}},
+                "required": ["project_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_issues",
+            "description": "List issues of a project (or all member projects), optionally filtered by state group. Use this to enumerate issues before bulk operations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "description": "Optional project UUID."},
+                    "state_group": {
+                        "type": "string",
+                        "enum": ["backlog", "unstarted", "started", "completed", "cancelled"],
+                        "description": "Optional state group filter.",
+                    },
+                    "limit": {"type": "integer", "description": "Max results, capped at 50."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bulk_update_issue_state",
+            "description": "Move MULTIPLE issues to a different state in one call. Use this when the user asks to move/transfer several or all issues.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "issue_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Issue UUIDs or identifiers like PROJ-123.",
+                    },
+                    "state_name": {"type": "string", "description": "Target state name (use list_states to discover exact names)."},
+                },
+                "required": ["issue_ids", "state_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "update_issue_state",
-            "description": "Move an issue to a different state. Provide either state_id or state_name.",
+            "description": "Move a single issue to a different state. Provide either state_id or state_name.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -246,18 +296,95 @@ def _resolve_issue(ctx, issue_id):
     return issues.get(pk=issue_id)
 
 
+def _tool_list_states(ctx, project_id):
+    project = Project.objects.get(pk=project_id, id__in=ctx["project_ids"])
+    states = State.objects.filter(project=project).order_by("sequence")
+    return [
+        {"id": str(state.id), "name": state.name, "group": state.group, "sequence": state.sequence}
+        for state in states
+    ]
+
+
+def _tool_list_issues(ctx, project_id=None, state_group=None, limit=50):
+    issues = Issue.issue_objects.filter(project_id__in=ctx["project_ids"])
+    if project_id:
+        issues = issues.filter(project_id=project_id)
+    if state_group:
+        issues = issues.filter(state__group=state_group)
+    limit = max(1, min(int(limit or 50), 50))
+    return [
+        _serialize_issue_summary(issue)
+        for issue in issues.select_related("project", "state").order_by("-created_at")[:limit]
+    ]
+
+
+# Алиасы названий состояний -> группа (частые варианты от пользователя/модели)
+STATE_GROUP_ALIASES = {
+    "canceled": "cancelled",
+    "cancel": "cancelled",
+    "отменено": "cancelled",
+    "отмена": "cancelled",
+    "done": "completed",
+    "сделано": "completed",
+    "готово": "completed",
+    "завершено": "completed",
+    "todo": "unstarted",
+    "in progress": "started",
+    "backlog": "backlog",
+}
+
+
+def _resolve_state(project, state_id=None, state_name=None):
+    states = State.objects.filter(project=project)
+    if state_id:
+        return states.get(pk=state_id)
+    if not state_name:
+        raise ValueError("Either state_id or state_name is required")
+    # Точное совпадение по имени
+    try:
+        return states.get(name__iexact=state_name)
+    except State.DoesNotExist:
+        pass
+    # Совпадение по группе или алиасу
+    group = STATE_GROUP_ALIASES.get(state_name.strip().lower())
+    if group:
+        try:
+            return states.get(group=group)
+        except State.DoesNotExist:
+            pass
+    available = ", ".join(states.values_list("name", flat=True))
+    raise ValueError(
+        f"State '{state_name}' not found. Available states: {available}"
+    )
+
+
 def _tool_update_issue_state(ctx, issue_id, state_id=None, state_name=None):
     issue = _resolve_issue(ctx, issue_id)
-    states = State.objects.filter(project=issue.project)
-    if state_id:
-        state = states.get(pk=state_id)
-    elif state_name:
-        state = states.get(name__iexact=state_name)
-    else:
-        raise ValueError("Either state_id or state_name is required")
+    state = _resolve_state(issue.project, state_id=state_id, state_name=state_name)
     issue.state = state
     issue.save()
     return {"id": str(issue.id), "state": state.name, "state_id": str(state.id)}
+
+
+def _tool_bulk_update_issue_state(ctx, issue_ids, state_name):
+    if not issue_ids:
+        raise ValueError("issue_ids is required and must not be empty")
+    updated, errors = [], []
+    for issue_id in issue_ids[:50]:
+        try:
+            issue = _resolve_issue(ctx, issue_id)
+            state = _resolve_state(issue.project, state_name=state_name)
+            issue.state = state
+            issue.save()
+            updated.append({"id": str(issue.id), "state": state.name})
+        except Exception as e:
+            errors.append({"issue_id": issue_id, "error": str(e)})
+    return {
+        "updated_count": len(updated),
+        "updated": updated,
+        "errors": errors,
+        "state": state.name if updated else None,
+    }
 
 
 def _tool_add_issue_comment(ctx, issue_id, comment_text):
@@ -275,10 +402,13 @@ def _tool_add_issue_comment(ctx, issue_id, comment_text):
 
 TOOL_HANDLERS = {
     "list_projects": _tool_list_projects,
+    "list_states": _tool_list_states,
+    "list_issues": _tool_list_issues,
     "search_issues": _tool_search_issues,
     "get_issue": _tool_get_issue,
     "create_issue": _tool_create_issue,
     "update_issue_state": _tool_update_issue_state,
+    "bulk_update_issue_state": _tool_bulk_update_issue_state,
     "add_issue_comment": _tool_add_issue_comment,
 }
 
@@ -308,7 +438,10 @@ def _build_system_prompt(workspace):
         "The tools understand identifiers like PROJ-123 — prefer them when the user references a specific issue. "
         "CRITICAL: never claim that you created, updated or deleted anything unless the corresponding tool "
         "was actually called and returned a success result. If you did not call a tool, honestly say "
-        "that no changes were made and explain why."
+        "that no changes were made and explain why. "
+        "When asked to change issue states, first call list_states to get the exact state names of the project. "
+        "When asked to move or update multiple issues, first enumerate them with list_issues, then use "
+        "bulk_update_issue_state (or update_issue_state per issue). Never simulate a bulk change in text only."
     )
 
 
