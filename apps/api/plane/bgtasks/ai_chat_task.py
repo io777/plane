@@ -10,6 +10,15 @@ import re
 # Идентификатор задачи вида PROJ-123 (project.identifier + sequence_id)
 ISSUE_IDENTIFIER_RE = re.compile(r"^([A-Za-z][A-Za-z0-9]*)-(\d+)$")
 
+# Эвристика "заявления о записи" в финальном тексте (для анти-галлюцинационной
+# пометки, если инструменты записи не вызывались)
+WRITE_CLAIM_RE = re.compile(
+    r"(создал[аи]?|создан[аыо]?|перен[её]с|перенесен[аыо]?|перенесла"
+    r"|изменил[аи]?|обновил[аи]?|обновлен[аыо]?|удалил[аи]?|удален[аыо]?"
+    r"|created|moved|updated|deleted)\b",
+    re.IGNORECASE,
+)
+
 # Django imports
 from django.contrib.auth import get_user_model
 from django.db.models import Q
@@ -465,12 +474,14 @@ def _run_agent(user, workspace, thread_id, exclude_message_id):
 
     final_text = ""
     tools_used = []
-    for _ in range(MAX_AGENT_ITERATIONS):
+    for iteration in range(MAX_AGENT_ITERATIONS):
         response = client.chat.completions.create(
             model=model,
             messages=messages,
             tools=TOOL_SCHEMAS,
-            tool_choice="auto",
+            # Первый вызов за ход — принудительно с инструментом: иначе модель
+            # может "ответить текстом" и сымитировать действие без tool calls
+            tool_choice="required" if iteration == 0 else "auto",
         )
         choice = response.choices[0]
         assistant_message = choice.message
@@ -510,6 +521,16 @@ def _run_agent(user, workspace, thread_id, exclude_message_id):
         "tools_used": tools_used,
         "mutated": any(tool in WRITE_TOOLS for tool in tools_used),
     }
+
+    # Страховка от галлюцинаций: если в финальном тексте заявлено изменение
+    # данных, а инструменты записи не вызывались — честно предупреждаем
+    if not meta["mutated"] and WRITE_CLAIM_RE.search(final_text or ""):
+        final_text += (
+            "\n\n⚠️ Внимание: в ответе заявлено изменение данных, но инструменты "
+            "записи не вызывались — скорее всего, никаких изменений не было. "
+            "Попробуйте переформулировать запрос."
+        )
+
     return final_text, meta
 
 
