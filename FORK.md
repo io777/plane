@@ -21,7 +21,7 @@ This fork adds a self-hosted AI chat assistant (Twenty CRM style) to Plane CE.
 | `plane/app/views/__init__.py` | +1 re-export line |
 | `plane/app/urls/ai_chat.py` | NEW — routes under `workspaces/<slug>/ai-chat/` |
 | `plane/app/urls/__init__.py` | +2 lines (import + splat) |
-| `plane/bgtasks/ai_chat_task.py` | NEW — Celery agent loop + 6 Plane tools |
+| `plane/bgtasks/ai_chat_task.py` | NEW — Celery agent loop + 10 Plane tools (incl. `create_project`) |
 | `plane/settings/common.py` | +1 line in `CELERY_IMPORTS` |
 | `plane/utils/instance_config_variables/core.py` | +3 config keys (`AI_CHAT_API_KEY`, `AI_CHAT_BASE_URL`, `AI_CHAT_MODEL`) |
 

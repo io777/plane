@@ -33,6 +33,7 @@ from openai import OpenAI
 # Module imports
 from plane.db.models import (
     AIChatMessage,
+    DEFAULT_STATES,
     Issue,
     IssueComment,
     Project,
@@ -41,6 +42,7 @@ from plane.db.models import (
     Workspace,
     WorkspaceMember,
 )
+from plane.db.models.project import ROLE
 from plane.license.utils.instance_value import get_configuration_value
 from plane.utils.exception_logger import log_exception
 
@@ -51,7 +53,7 @@ HISTORY_LIMIT = 20
 # Hard cap on issues returned by the search_issues tool
 SEARCH_LIMIT = 25
 # Tools that modify data — used to flag messages that changed workspace data
-WRITE_TOOLS = {"create_issue", "update_issue_state", "bulk_update_issue_state", "add_issue_comment"}
+WRITE_TOOLS = {"create_project", "create_issue", "update_issue_state", "bulk_update_issue_state", "add_issue_comment"}
 
 TOOL_SCHEMAS = [
     {
@@ -60,6 +62,25 @@ TOOL_SCHEMAS = [
             "name": "list_projects",
             "description": "List the projects in the current workspace that the user is a member of.",
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_project",
+            "description": "Create a new project in the current workspace. The user becomes the project admin and default workflow states (Backlog, Todo, In Progress, Done, Cancelled) are created automatically.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Project name."},
+                    "identifier": {
+                        "type": "string",
+                        "description": "Optional short issue prefix (e.g. 'FR' for FR-123). Max 12 chars, letters/digits only. Auto-derived from the name if omitted.",
+                    },
+                    "description_text": {"type": "string", "description": "Optional plain text project description."},
+                },
+                "required": ["name"],
+            },
         },
     },
     {
@@ -218,6 +239,71 @@ def _serialize_issue_summary(issue):
 def _tool_list_projects(ctx):
     projects = Project.objects.filter(id__in=ctx["project_ids"]).values("id", "name", "identifier")
     return [{"id": str(project["id"]), "name": project["name"], "identifier": project["identifier"]} for project in projects]
+
+
+def _derive_project_identifier(ctx, name):
+    # Identifier: до 12 символов, только буквы/цифры (дефисы и прочее запрещены
+    # Project.FORBIDDEN_IDENTIFIER_CHARS_PATTERN), уникален в пределах workspace
+    base = re.sub(r"[^A-Za-z0-9]", "", name).upper()[:12]
+    if not base:
+        base = "PROJ"
+    identifier = base
+    counter = 2
+    while Project.objects.filter(workspace=ctx["workspace"], identifier=identifier).exists():
+        suffix = str(counter)
+        identifier = f"{base[:12 - len(suffix)]}{suffix}"
+        counter += 1
+    return identifier
+
+
+def _tool_create_project(ctx, name, identifier=None, description_text=""):
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("Project name is required")
+    if re.match(Project.FORBIDDEN_IDENTIFIER_CHARS_PATTERN, name):
+        raise ValueError("Project name contains forbidden special characters")
+    if Project.objects.filter(workspace=ctx["workspace"], name=name).exists():
+        raise ValueError(f"A project named '{name}' already exists in this workspace")
+    if identifier:
+        identifier = identifier.strip().upper()
+        if len(identifier) > 12:
+            raise ValueError("Identifier must be at most 12 characters")
+        if re.match(Project.FORBIDDEN_IDENTIFIER_CHARS_PATTERN, identifier):
+            raise ValueError("Identifier contains forbidden special characters (letters and digits only)")
+        if Project.objects.filter(workspace=ctx["workspace"], identifier=identifier).exists():
+            raise ValueError(f"Identifier '{identifier}' is already used by another project in this workspace")
+    else:
+        identifier = _derive_project_identifier(ctx, name)
+
+    project = Project.objects.create(
+        workspace=ctx["workspace"],
+        name=name,
+        identifier=identifier,
+        description=description_text or "",
+        created_by=ctx["user"],
+    )
+    # Создатель становится админом проекта (как в ProjectViewSet.create)
+    ProjectMember.objects.create(
+        project=project, member=ctx["user"], role=ROLE.ADMIN.value
+    )
+    State.objects.bulk_create(
+        [
+            State(
+                name=state["name"],
+                color=state["color"],
+                project=project,
+                sequence=state["sequence"],
+                workspace=ctx["workspace"],
+                group=state["group"],
+                default=state.get("default", False),
+                created_by=ctx["user"],
+            )
+            for state in DEFAULT_STATES
+        ]
+    )
+    # Новый проект сразу доступен остальным инструментам в этом же запросе
+    ctx["project_ids"].add(project.id)
+    return {"id": str(project.id), "name": project.name, "identifier": project.identifier}
 
 
 def _tool_search_issues(ctx, query, project_id=None, state_group=None, limit=10):
@@ -412,6 +498,7 @@ def _tool_add_issue_comment(ctx, issue_id, comment_text):
 
 TOOL_HANDLERS = {
     "list_projects": _tool_list_projects,
+    "create_project": _tool_create_project,
     "list_states": _tool_list_states,
     "list_issues": _tool_list_issues,
     "search_issues": _tool_search_issues,
@@ -442,7 +529,8 @@ def _build_system_prompt(workspace):
         "You are an AI assistant inside Plane, a project management tool. "
         f"Today's date is {timezone.now().date().isoformat()}. "
         f"You are operating in the workspace '{workspace.slug}'. "
-        "You may use the provided tools to query and modify issues in the projects the user is a member of. "
+        "You may use the provided tools to query and modify issues in the projects the user is a member of, "
+        "and to create new projects in the workspace. "
         "Answer concisely and always in the user's language. "
         "When listing issues, always include the issue identifier (e.g. PROJ-123) and its state. "
         "The tools understand identifiers like PROJ-123 — prefer them when the user references a specific issue. "
