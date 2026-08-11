@@ -55,12 +55,14 @@ export class AIChatStore implements IAIChatStore {
   // internal
   private pollingInterval: ReturnType<typeof setInterval> | null = null;
   private workspaceSlug: string | null = null;
+  private rootStore: RootStore;
   // ids of messages seen as "processing" in the previous poll tick
   private previouslyProcessingIds = new Set<string>();
   // service
   private aiChatService: AIChatService;
 
-  constructor(_rootStore: RootStore) {
+  constructor(rootStore: RootStore) {
+    this.rootStore = rootStore;
     makeObservable(this, {
       // observables
       isOpen: observable,
@@ -92,14 +94,11 @@ export class AIChatStore implements IAIChatStore {
       () => [this.isOpen, this.currentThreadId, this.workspaceSlug] as const,
       ([isOpen, currentThreadId, workspaceSlug]) => {
         try {
-          window.sessionStorage.setItem(
-            PANEL_STATE_KEY,
-            JSON.stringify({ isOpen, currentThreadId, workspaceSlug }),
-          );
+          window.sessionStorage.setItem(PANEL_STATE_KEY, JSON.stringify({ isOpen, currentThreadId, workspaceSlug }));
         } catch {
           // ignore persistence errors
         }
-      },
+      }
     );
   }
 
@@ -137,6 +136,85 @@ export class AIChatStore implements IAIChatStore {
   }
 
   /**
+   * Refreshes the active Plane stores after an AI write completes.
+   * The AI tools write directly to the database and therefore do not emit the
+   * realtime events used by the regular UI mutations.
+   */
+  private refreshVisibleData = async (workspaceSlug: string) => {
+    const { router, issue } = this.rootStore;
+    if (router.workspaceSlug !== workspaceSlug) return;
+
+    const projectId = router.projectId;
+    const refreshes: Promise<unknown>[] = [];
+
+    if (router.globalViewId) {
+      refreshes.push(
+        issue.workspaceIssues.fetchIssuesWithExistingPagination(workspaceSlug, router.globalViewId, "mutation")
+      );
+    } else if (router.userId) {
+      refreshes.push(issue.profileIssues.fetchIssuesWithExistingPagination(workspaceSlug, router.userId, "mutation"));
+    } else if (router.teamspaceId && router.viewId && projectId) {
+      refreshes.push(
+        issue.teamViewIssues.fetchIssuesWithExistingPagination(workspaceSlug, projectId, router.viewId, "mutation")
+      );
+    } else if (router.teamspaceId && projectId) {
+      refreshes.push(
+        issue.teamProjectWorkItems.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation")
+      );
+    } else if (router.viewId && projectId) {
+      refreshes.push(
+        issue.projectViewIssues.fetchIssuesWithExistingPagination(workspaceSlug, projectId, router.viewId, "mutation")
+      );
+    } else if (router.cycleId && projectId) {
+      refreshes.push(
+        issue.cycleIssues.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation", router.cycleId)
+      );
+    } else if (router.moduleId && projectId) {
+      refreshes.push(
+        issue.moduleIssues.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation", router.moduleId)
+      );
+    } else if (router.epicId && projectId) {
+      refreshes.push(issue.projectEpics.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation"));
+    } else if (projectId) {
+      refreshes.push(issue.projectIssues.fetchIssuesWithExistingPagination(workspaceSlug, projectId, "mutation"));
+    }
+
+    // Refresh the workspace project list as well (create_project is an AI write).
+    refreshes.push(this.rootStore.projectRoot.project.fetchProjects(workspaceSlug));
+
+    // Keep project/cycle/module counters in sync with the refreshed issue list.
+    if (projectId) {
+      refreshes.push(this.rootStore.projectRoot.project.fetchProjectDetails(workspaceSlug, projectId));
+    }
+    if (projectId && router.cycleId) {
+      refreshes.push(this.rootStore.cycle.fetchCycleDetails(workspaceSlug, projectId, router.cycleId));
+    }
+    if (projectId && router.moduleId) {
+      refreshes.push(this.rootStore.module.fetchModuleDetails(workspaceSlug, projectId, router.moduleId));
+    }
+
+    // Issue detail has separate stores for the issue, comments and activity.
+    if (projectId && router.issueId) {
+      refreshes.push(issue.issueDetail.fetchIssue(workspaceSlug, projectId, router.issueId));
+    }
+
+    // A peek modal can be open while the URL still points at a list view.
+    const peekIssue = issue.issueDetail.peekIssue;
+    if (peekIssue && peekIssue.workspaceSlug === workspaceSlug && peekIssue.issueId !== router.issueId) {
+      refreshes.push(issue.issueDetail.fetchIssue(workspaceSlug, peekIssue.projectId, peekIssue.issueId));
+    }
+
+    await Promise.allSettled(refreshes);
+  };
+
+  private markMutation = (workspaceSlug: string) => {
+    runInAction(() => {
+      this.mutationNonce += 1;
+    });
+    void this.refreshVisibleData(workspaceSlug);
+  };
+
+  /**
    * Toggles the AI chat panel
    * @param value - optional explicit open state
    */
@@ -146,12 +224,13 @@ export class AIChatStore implements IAIChatStore {
   };
 
   /**
-   * Opens or closes the AI chat panel; stops polling when closed
+   * Opens or closes the AI chat panel; keep polling while an answer is processing
+   * so a completed mutation is refreshed even if the panel is closed.
    * @param value
    */
   setOpen = (value: boolean) => {
     this.isOpen = value;
-    if (!value) this.stopPolling();
+    if (!value && !this.isAnyMessageProcessing) this.stopPolling();
   };
 
   /**
@@ -299,7 +378,13 @@ export class AIChatStore implements IAIChatStore {
         this.isSending = false;
         this.error = null;
       });
-      if (this.currentThreadId === threadId && this.isAnyMessageProcessing) this.startPolling(workspaceSlug);
+      if (this.currentThreadId === threadId) {
+        if (this.isAnyMessageProcessing) {
+          this.startPolling(workspaceSlug);
+        } else if (response.assistant_message.meta?.mutated) {
+          this.markMutation(workspaceSlug);
+        }
+      }
     } catch {
       runInAction(() => {
         if (this.currentThreadId === threadId) {
@@ -320,10 +405,14 @@ export class AIChatStore implements IAIChatStore {
    */
   startPolling = (workspaceSlug: string) => {
     if (this.pollingInterval) return;
-    this.previouslyProcessingIds = new Set();
+    // Seed from the messages already in the store so a response that finishes
+    // before the very first poll is still recognized as a completed mutation.
+    this.previouslyProcessingIds = new Set(
+      this.messages.filter((message) => message.status === "processing").map((message) => message.id)
+    );
     this.pollingInterval = setInterval(async () => {
       const threadId = this.currentThreadId;
-      if (!this.isOpen || !threadId) {
+      if (!threadId) {
         this.stopPolling();
         return;
       }
@@ -333,25 +422,21 @@ export class AIChatStore implements IAIChatStore {
           if (this.currentThreadId !== threadId) return;
           this.messages = messages;
         });
+        if (this.currentThreadId !== threadId) return;
+
         // If an agent message that was processing in the previous tick finished
-        // and it mutated workspace data, bump mutationNonce — the dock listens
-        // to it and revalidates all SWR caches, so pages refresh in place
-        // (no full page reload, the chat stays open)
+        // and it mutated workspace data, refresh both SWR and MobX stores.
         const finishedIds = [...this.previouslyProcessingIds].filter(
-          (id) => !messages.some((m) => m.id === id && m.status === "processing"),
+          (id) => !messages.some((m) => m.id === id && m.status === "processing")
         );
-        const mutated = finishedIds.some((id) => {
+        const shouldRefresh = finishedIds.some((id) => {
           const message = messages.find((m) => m.id === id);
-          return message?.status === "completed" && message?.meta?.mutated === true;
+          return message?.status === "error" || (message?.status === "completed" && message?.meta?.mutated === true);
         });
-        this.previouslyProcessingIds = new Set(
-          messages.filter((m) => m.status === "processing").map((m) => m.id),
-        );
-        if (mutated) {
-          runInAction(() => {
-            this.mutationNonce += 1;
-          });
-        }
+        this.previouslyProcessingIds = new Set(messages.filter((m) => m.status === "processing").map((m) => m.id));
+        // An error can happen after an earlier tool call already committed data,
+        // so terminal error responses refresh the visible stores defensively too.
+        if (shouldRefresh) this.markMutation(workspaceSlug);
         if (!this.isAnyMessageProcessing) this.stopPolling();
       } catch {
         // keep polling on transient errors; the next tick retries
