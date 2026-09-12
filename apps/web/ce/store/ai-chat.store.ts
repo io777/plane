@@ -38,6 +38,7 @@ export interface IAIChatStore {
   sendMessage: (workspaceSlug: string, content: string) => Promise<void>;
   startPolling: (workspaceSlug: string) => void;
   stopPolling: () => void;
+  hydrateFromStorage: () => void;
 }
 
 export class AIChatStore implements IAIChatStore {
@@ -82,22 +83,9 @@ export class AIChatStore implements IAIChatStore {
       selectThread: action,
       sendMessage: action,
       stopPolling: action,
+      hydrateFromStorage: action,
     });
     this.aiChatService = new AIChatService();
-
-    // Restore panel state across page reloads (the page reloads when the agent
-    // mutates workspace data — the chat should stay open with the same thread)
-    try {
-      const saved = window.sessionStorage.getItem(PANEL_STATE_KEY);
-      if (saved) {
-        const { isOpen, currentThreadId, workspaceSlug } = JSON.parse(saved);
-        this.isOpen = isOpen ?? false;
-        this.currentThreadId = currentThreadId ?? null;
-        this.workspaceSlug = workspaceSlug ?? null;
-      }
-    } catch {
-      // sessionStorage unavailable or corrupted state — start fresh
-    }
 
     // Persist panel state on every change
     reaction(
@@ -113,12 +101,33 @@ export class AIChatStore implements IAIChatStore {
         }
       },
     );
+  }
+
+  /**
+   * Restore panel state from sessionStorage AFTER mount (called from the dock's
+   * useEffect). Doing this in the constructor breaks SSR hydration: the server
+   * HTML has the panel closed while the client renders it open (React #418).
+   */
+  hydrateFromStorage = (): void => {
+    // Restore panel state across page reloads (the page reloads when the agent
+    // mutates workspace data — the chat should stay open with the same thread)
+    try {
+      const saved = window.sessionStorage.getItem(PANEL_STATE_KEY);
+      if (saved) {
+        const { isOpen, currentThreadId, workspaceSlug } = JSON.parse(saved);
+        this.isOpen = isOpen ?? false;
+        this.currentThreadId = currentThreadId ?? null;
+        this.workspaceSlug = workspaceSlug ?? null;
+      }
+    } catch {
+      // sessionStorage unavailable or corrupted state — start fresh
+    }
 
     // After a reload, re-fetch messages of the restored open thread
     if (this.isOpen && this.currentThreadId && this.workspaceSlug) {
       void this.selectThread(this.workspaceSlug, this.currentThreadId);
     }
-  }
+  };
 
   /**
    * Returns whether any message in the current thread is still being processed

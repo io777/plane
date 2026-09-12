@@ -47,6 +47,12 @@ export const AIChatDock = observer(function AIChatDock() {
     }
   }, [mutationNonce, mutate]);
 
+  // restore the persisted panel state only after mount (SSR-safe)
+  useEffect(() => {
+    aiChatStore.hydrateFromStorage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // close the panel on Escape
   useKeypress("Escape", () => {
     if (isOpen) aiChatStore.setOpen(false);
